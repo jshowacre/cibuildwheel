@@ -43,7 +43,6 @@ class DockerContainer:
 
     def __enter__(self) -> "DockerContainer":
         self.name = f"cibuildwheel-{uuid.uuid4()}"
-        cwd_args = ["-w", str(self.cwd)] if self.cwd else []
         shell_args = ["linux32", "/bin/bash"] if self.simulate_32_bit else ["/bin/bash"]
         subprocess.run(
             [
@@ -53,7 +52,6 @@ class DockerContainer:
                 f"--name={self.name}",
                 "--interactive",
                 "--volume=/:/host",  # ignored on CircleCI
-                *cwd_args,
                 self.docker_image,
                 *shell_args,
             ],
@@ -76,7 +74,13 @@ class DockerContainer:
         self.bash_stdout = self.process.stdout
 
         # run a noop command to block until the container is responding
-        self.call(["/bin/true"])
+        self.call(["/bin/true"], cwd="")
+
+        if self.cwd:
+            # Although `docker create -w` does create the working dir if it
+            # does not exist, podman does not. Unfortunately I don't think
+            # there is a way to set the workdir on a running container.
+            self.call(["mkdir", "-p", str(self.cwd)], cwd="")
 
         return self
 
@@ -88,12 +92,11 @@ class DockerContainer:
     ) -> None:
 
         self.bash_stdin.close()
-        self.process.terminate()
-        self.process.wait()
 
         assert isinstance(self.name, str)
-
         subprocess.run(["docker", "rm", "--force", "-v", self.name], stdout=subprocess.DEVNULL)
+        self.process.terminate()
+        self.process.wait()
         self.name = None
 
     def copy_into(self, from_path: Path, to_path: PurePath) -> None:
@@ -151,6 +154,10 @@ class DockerContainer:
         capture_output: bool = False,
         cwd: Optional[PathOrStr] = None,
     ) -> str:
+        if cwd is None:
+            # Hack because podman won't let us start a container with our
+            # desired working dir
+            cwd = self.cwd
 
         chdir = f"cd {cwd}" if cwd else ""
         env_assignments = (
